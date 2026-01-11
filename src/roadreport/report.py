@@ -1,524 +1,327 @@
 """
-RoadReport - Reporting & Export System for BlackRoad
-Generate reports, export data, and schedule report delivery.
+RoadReport - Report Generation for BlackRoad
+Generate reports with sections, charts, and multiple formats.
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Union
-import asyncio
-import csv
-import hashlib
-import io
 import json
 import logging
-import threading
-import uuid
 
 logger = logging.getLogger(__name__)
 
 
 class ReportFormat(str, Enum):
-    """Report output formats."""
-    JSON = "json"
-    CSV = "csv"
     HTML = "html"
-    PDF = "pdf"
-    EXCEL = "excel"
+    JSON = "json"
+    TEXT = "text"
     MARKDOWN = "markdown"
 
 
-class ReportStatus(str, Enum):
-    """Report generation status."""
-    PENDING = "pending"
-    GENERATING = "generating"
-    COMPLETED = "completed"
-    FAILED = "failed"
-
-
-class ScheduleFrequency(str, Enum):
-    """Report schedule frequency."""
-    DAILY = "daily"
-    WEEKLY = "weekly"
-    MONTHLY = "monthly"
-    QUARTERLY = "quarterly"
+class ChartType(str, Enum):
+    BAR = "bar"
+    LINE = "line"
+    PIE = "pie"
+    TABLE = "table"
 
 
 @dataclass
-class ReportColumn:
-    """A report column definition."""
-    name: str
-    field: str
-    formatter: Optional[Callable[[Any], str]] = None
-    width: Optional[int] = None
-    sortable: bool = True
-    filterable: bool = True
+class ChartData:
+    type: ChartType
+    title: str
+    labels: List[str]
+    datasets: List[Dict[str, Any]]
+    options: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
-class ReportFilter:
-    """A report filter."""
-    field: str
-    operator: str  # eq, ne, gt, lt, gte, lte, contains, in
-    value: Any
-
-
-@dataclass
-class ReportDefinition:
-    """Definition of a report."""
-    id: str
-    name: str
-    description: str = ""
-    columns: List[ReportColumn] = field(default_factory=list)
-    data_source: Optional[Callable[[], List[Dict]]] = None
-    filters: List[ReportFilter] = field(default_factory=list)
-    sort_by: Optional[str] = None
-    sort_order: str = "asc"
-    group_by: Optional[str] = None
-    aggregations: Dict[str, str] = field(default_factory=dict)  # field -> agg function
+class ReportSection:
+    title: str
+    content: str = ""
+    data: Optional[Any] = None
+    chart: Optional[ChartData] = None
+    subsections: List["ReportSection"] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
-class GeneratedReport:
-    """A generated report."""
-    id: str
-    definition_id: str
-    format: ReportFormat
-    status: ReportStatus = ReportStatus.PENDING
-    content: Optional[bytes] = None
-    row_count: int = 0
-    generated_at: Optional[datetime] = None
-    generation_time_ms: float = 0
-    error: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+class ReportConfig:
+    title: str
+    subtitle: str = ""
+    author: str = ""
+    date: datetime = field(default_factory=datetime.now)
+    format: ReportFormat = ReportFormat.HTML
+    header: str = ""
+    footer: str = ""
+    styles: Dict[str, str] = field(default_factory=dict)
 
 
-@dataclass
-class ReportSchedule:
-    """A report schedule."""
-    id: str
-    definition_id: str
-    format: ReportFormat
-    frequency: ScheduleFrequency
-    recipients: List[str] = field(default_factory=list)
-    next_run: Optional[datetime] = None
-    last_run: Optional[datetime] = None
-    enabled: bool = True
-    metadata: Dict[str, Any] = field(default_factory=dict)
+class HTMLRenderer:
+    def __init__(self, config: ReportConfig):
+        self.config = config
 
-
-class DataProcessor:
-    """Process report data."""
-
-    def filter(self, data: List[Dict], filters: List[ReportFilter]) -> List[Dict]:
-        """Apply filters to data."""
-        result = data
+    def render(self, sections: List[ReportSection]) -> str:
+        parts = [
+            "<!DOCTYPE html>",
+            "<html>",
+            "<head>",
+            f"<title>{self.config.title}</title>",
+            "<style>",
+            "body { font-family: Arial, sans-serif; margin: 40px; }",
+            "h1 { color: #333; }",
+            "h2 { color: #666; border-bottom: 1px solid #eee; }",
+            "table { border-collapse: collapse; width: 100%; }",
+            "th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }",
+            "th { background-color: #f4f4f4; }",
+            "</style>",
+            "</head>",
+            "<body>",
+            f"<h1>{self.config.title}</h1>",
+        ]
         
-        for f in filters:
-            result = [
-                row for row in result
-                if self._apply_filter(row.get(f.field), f.operator, f.value)
-            ]
+        if self.config.subtitle:
+            parts.append(f"<p><em>{self.config.subtitle}</em></p>")
         
-        return result
+        if self.config.author:
+            parts.append(f"<p>Author: {self.config.author} | Date: {self.config.date.strftime('%Y-%m-%d')}</p>")
+        
+        for section in sections:
+            parts.append(self._render_section(section, level=2))
+        
+        if self.config.footer:
+            parts.append(f"<footer>{self.config.footer}</footer>")
+        
+        parts.extend(["</body>", "</html>"])
+        return "\n".join(parts)
 
-    def _apply_filter(self, value: Any, operator: str, filter_value: Any) -> bool:
-        if operator == "eq":
-            return value == filter_value
-        elif operator == "ne":
-            return value != filter_value
-        elif operator == "gt":
-            return value > filter_value
-        elif operator == "lt":
-            return value < filter_value
-        elif operator == "gte":
-            return value >= filter_value
-        elif operator == "lte":
-            return value <= filter_value
-        elif operator == "contains":
-            return filter_value in str(value)
-        elif operator == "in":
-            return value in filter_value
-        return True
+    def _render_section(self, section: ReportSection, level: int) -> str:
+        parts = [f"<h{level}>{section.title}</h{level}>"]
+        
+        if section.content:
+            parts.append(f"<p>{section.content}</p>")
+        
+        if section.data:
+            parts.append(self._render_data(section.data))
+        
+        if section.chart:
+            parts.append(self._render_chart(section.chart))
+        
+        for subsection in section.subsections:
+            parts.append(self._render_section(subsection, level + 1))
+        
+        return "\n".join(parts)
 
-    def sort(self, data: List[Dict], field: str, order: str = "asc") -> List[Dict]:
-        """Sort data."""
-        reverse = order.lower() == "desc"
-        return sorted(data, key=lambda x: x.get(field, ""), reverse=reverse)
+    def _render_data(self, data: Any) -> str:
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            return self._render_table(data)
+        return f"<pre>{json.dumps(data, indent=2, default=str)}</pre>"
 
-    def group(self, data: List[Dict], field: str) -> Dict[str, List[Dict]]:
-        """Group data by field."""
-        groups: Dict[str, List[Dict]] = {}
+    def _render_table(self, data: List[Dict]) -> str:
+        if not data:
+            return ""
+        headers = list(data[0].keys())
+        parts = ["<table>", "<thead><tr>"]
+        for header in headers:
+            parts.append(f"<th>{header}</th>")
+        parts.append("</tr></thead><tbody>")
         for row in data:
-            key = str(row.get(field, ""))
-            if key not in groups:
-                groups[key] = []
-            groups[key].append(row)
-        return groups
+            parts.append("<tr>")
+            for header in headers:
+                parts.append(f"<td>{row.get(header, '')}</td>")
+            parts.append("</tr>")
+        parts.append("</tbody></table>")
+        return "\n".join(parts)
 
-    def aggregate(
-        self,
-        data: List[Dict],
-        aggregations: Dict[str, str]
-    ) -> Dict[str, Any]:
-        """Apply aggregations."""
-        result = {}
+    def _render_chart(self, chart: ChartData) -> str:
+        if chart.type == ChartType.TABLE:
+            return self._render_table(chart.datasets[0].get("data", []))
+        return f"<div class='chart'><strong>{chart.title}</strong><pre>{json.dumps(chart.datasets, indent=2)}</pre></div>"
+
+
+class MarkdownRenderer:
+    def __init__(self, config: ReportConfig):
+        self.config = config
+
+    def render(self, sections: List[ReportSection]) -> str:
+        parts = [f"# {self.config.title}", ""]
         
-        for field, agg in aggregations.items():
-            values = [row.get(field) for row in data if row.get(field) is not None]
-            
-            if agg == "sum":
-                result[field] = sum(values)
-            elif agg == "avg":
-                result[field] = sum(values) / len(values) if values else 0
-            elif agg == "min":
-                result[field] = min(values) if values else None
-            elif agg == "max":
-                result[field] = max(values) if values else None
-            elif agg == "count":
-                result[field] = len(values)
+        if self.config.subtitle:
+            parts.append(f"*{self.config.subtitle}*\n")
         
-        return result
+        if self.config.author:
+            parts.append(f"**Author:** {self.config.author} | **Date:** {self.config.date.strftime('%Y-%m-%d')}\n")
+        
+        for section in sections:
+            parts.append(self._render_section(section, level=2))
+        
+        return "\n".join(parts)
+
+    def _render_section(self, section: ReportSection, level: int) -> str:
+        parts = [f"{'#' * level} {section.title}", ""]
+        
+        if section.content:
+            parts.append(section.content + "\n")
+        
+        if section.data:
+            parts.append(self._render_data(section.data))
+        
+        for subsection in section.subsections:
+            parts.append(self._render_section(subsection, level + 1))
+        
+        return "\n".join(parts)
+
+    def _render_data(self, data: Any) -> str:
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            return self._render_table(data)
+        return f"```json\n{json.dumps(data, indent=2, default=str)}\n```\n"
+
+    def _render_table(self, data: List[Dict]) -> str:
+        if not data:
+            return ""
+        headers = list(data[0].keys())
+        parts = ["| " + " | ".join(headers) + " |"]
+        parts.append("| " + " | ".join(["---"] * len(headers)) + " |")
+        for row in data:
+            values = [str(row.get(h, "")) for h in headers]
+            parts.append("| " + " | ".join(values) + " |")
+        return "\n".join(parts) + "\n"
 
 
-class ReportFormatter:
-    """Format reports for output."""
+class ReportBuilder:
+    def __init__(self, config: ReportConfig = None):
+        self.config = config or ReportConfig(title="Report")
+        self.sections: List[ReportSection] = []
+        self._current_section: Optional[ReportSection] = None
 
-    def format(
-        self,
-        definition: ReportDefinition,
-        data: List[Dict],
-        output_format: ReportFormat
-    ) -> bytes:
-        """Format data to specified format."""
-        if output_format == ReportFormat.JSON:
-            return self._to_json(definition, data)
-        elif output_format == ReportFormat.CSV:
-            return self._to_csv(definition, data)
-        elif output_format == ReportFormat.HTML:
-            return self._to_html(definition, data)
-        elif output_format == ReportFormat.MARKDOWN:
-            return self._to_markdown(definition, data)
+    def title(self, title: str) -> "ReportBuilder":
+        self.config.title = title
+        return self
+
+    def subtitle(self, subtitle: str) -> "ReportBuilder":
+        self.config.subtitle = subtitle
+        return self
+
+    def author(self, author: str) -> "ReportBuilder":
+        self.config.author = author
+        return self
+
+    def section(self, title: str, content: str = "") -> "ReportBuilder":
+        section = ReportSection(title=title, content=content)
+        self.sections.append(section)
+        self._current_section = section
+        return self
+
+    def subsection(self, title: str, content: str = "") -> "ReportBuilder":
+        if self._current_section:
+            subsection = ReportSection(title=title, content=content)
+            self._current_section.subsections.append(subsection)
+        return self
+
+    def data(self, data: Any) -> "ReportBuilder":
+        if self._current_section:
+            self._current_section.data = data
+        return self
+
+    def table(self, data: List[Dict]) -> "ReportBuilder":
+        return self.data(data)
+
+    def chart(self, chart_type: ChartType, title: str, labels: List[str], values: List[float]) -> "ReportBuilder":
+        if self._current_section:
+            self._current_section.chart = ChartData(
+                type=chart_type,
+                title=title,
+                labels=labels,
+                datasets=[{"data": values}]
+            )
+        return self
+
+    def build(self) -> "Report":
+        return Report(self.config, self.sections)
+
+
+class Report:
+    def __init__(self, config: ReportConfig, sections: List[ReportSection]):
+        self.config = config
+        self.sections = sections
+
+    def render(self, format: ReportFormat = None) -> str:
+        format = format or self.config.format
+        
+        if format == ReportFormat.HTML:
+            return HTMLRenderer(self.config).render(self.sections)
+        elif format == ReportFormat.MARKDOWN:
+            return MarkdownRenderer(self.config).render(self.sections)
+        elif format == ReportFormat.JSON:
+            return json.dumps({
+                "config": {"title": self.config.title, "subtitle": self.config.subtitle},
+                "sections": [self._section_to_dict(s) for s in self.sections]
+            }, indent=2, default=str)
         else:
-            return self._to_json(definition, data)
+            return self._render_text()
 
-    def _to_json(self, definition: ReportDefinition, data: List[Dict]) -> bytes:
-        output = {
-            "report": definition.name,
-            "generated_at": datetime.now().isoformat(),
-            "row_count": len(data),
-            "columns": [c.name for c in definition.columns],
-            "data": data
+    def _section_to_dict(self, section: ReportSection) -> Dict:
+        return {
+            "title": section.title,
+            "content": section.content,
+            "data": section.data,
+            "subsections": [self._section_to_dict(s) for s in section.subsections]
         }
-        return json.dumps(output, indent=2, default=str).encode()
 
-    def _to_csv(self, definition: ReportDefinition, data: List[Dict]) -> bytes:
-        output = io.StringIO()
-        fields = [c.field for c in definition.columns]
-        headers = [c.name for c in definition.columns]
-        
-        writer = csv.DictWriter(output, fieldnames=fields, extrasaction='ignore')
-        writer.writerow(dict(zip(fields, headers)))
-        
-        for row in data:
-            formatted_row = {}
-            for col in definition.columns:
-                value = row.get(col.field, "")
-                if col.formatter:
-                    value = col.formatter(value)
-                formatted_row[col.field] = value
-            writer.writerow(formatted_row)
-        
-        return output.getvalue().encode()
+    def _render_text(self) -> str:
+        parts = [self.config.title, "=" * len(self.config.title), ""]
+        for section in self.sections:
+            parts.append(section.title)
+            parts.append("-" * len(section.title))
+            if section.content:
+                parts.append(section.content)
+            parts.append("")
+        return "\n".join(parts)
 
-    def _to_html(self, definition: ReportDefinition, data: List[Dict]) -> bytes:
-        html = f"""<!DOCTYPE html>
-<html>
-<head>
-    <title>{definition.name}</title>
-    <style>
-        body {{ font-family: Arial, sans-serif; margin: 20px; }}
-        h1 {{ color: #333; }}
-        table {{ border-collapse: collapse; width: 100%; }}
-        th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
-        th {{ background-color: #4CAF50; color: white; }}
-        tr:nth-child(even) {{ background-color: #f2f2f2; }}
-    </style>
-</head>
-<body>
-    <h1>{definition.name}</h1>
-    <p>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-    <p>Rows: {len(data)}</p>
-    <table>
-        <tr>
-"""
-        for col in definition.columns:
-            html += f"            <th>{col.name}</th>\n"
-        html += "        </tr>\n"
-        
-        for row in data:
-            html += "        <tr>\n"
-            for col in definition.columns:
-                value = row.get(col.field, "")
-                if col.formatter:
-                    value = col.formatter(value)
-                html += f"            <td>{value}</td>\n"
-            html += "        </tr>\n"
-        
-        html += """    </table>
-</body>
-</html>"""
-        return html.encode()
-
-    def _to_markdown(self, definition: ReportDefinition, data: List[Dict]) -> bytes:
-        lines = [f"# {definition.name}", "", f"Generated: {datetime.now().isoformat()}", ""]
-        
-        # Header
-        headers = [col.name for col in definition.columns]
-        lines.append("| " + " | ".join(headers) + " |")
-        lines.append("| " + " | ".join(["---"] * len(headers)) + " |")
-        
-        # Rows
-        for row in data:
-            values = []
-            for col in definition.columns:
-                value = row.get(col.field, "")
-                if col.formatter:
-                    value = col.formatter(value)
-                values.append(str(value))
-            lines.append("| " + " | ".join(values) + " |")
-        
-        return "\n".join(lines).encode()
-
-
-class ReportStore:
-    """Store for reports."""
-
-    def __init__(self):
-        self.definitions: Dict[str, ReportDefinition] = {}
-        self.reports: Dict[str, GeneratedReport] = {}
-        self.schedules: Dict[str, ReportSchedule] = {}
-        self._lock = threading.Lock()
-
-    def save_definition(self, definition: ReportDefinition) -> None:
-        with self._lock:
-            self.definitions[definition.id] = definition
-
-    def get_definition(self, def_id: str) -> Optional[ReportDefinition]:
-        return self.definitions.get(def_id)
-
-    def save_report(self, report: GeneratedReport) -> None:
-        with self._lock:
-            self.reports[report.id] = report
-
-    def get_report(self, report_id: str) -> Optional[GeneratedReport]:
-        return self.reports.get(report_id)
-
-    def save_schedule(self, schedule: ReportSchedule) -> None:
-        with self._lock:
-            self.schedules[schedule.id] = schedule
-
-
-class ReportGenerator:
-    """Generate reports."""
-
-    def __init__(self, store: ReportStore):
-        self.store = store
-        self.processor = DataProcessor()
-        self.formatter = ReportFormatter()
-
-    async def generate(
-        self,
-        definition: ReportDefinition,
-        output_format: ReportFormat,
-        filters: List[ReportFilter] = None
-    ) -> GeneratedReport:
-        """Generate a report."""
-        import time
-        start_time = time.time()
-
-        report = GeneratedReport(
-            id=str(uuid.uuid4()),
-            definition_id=definition.id,
-            format=output_format,
-            status=ReportStatus.GENERATING
-        )
-
-        try:
-            # Get data
-            if definition.data_source:
-                data = definition.data_source()
-            else:
-                data = []
-
-            # Apply filters
-            all_filters = definition.filters + (filters or [])
-            data = self.processor.filter(data, all_filters)
-
-            # Sort
-            if definition.sort_by:
-                data = self.processor.sort(data, definition.sort_by, definition.sort_order)
-
-            # Format output
-            report.content = self.formatter.format(definition, data, output_format)
-            report.row_count = len(data)
-            report.status = ReportStatus.COMPLETED
-            report.generated_at = datetime.now()
-
-        except Exception as e:
-            report.status = ReportStatus.FAILED
-            report.error = str(e)
-            logger.error(f"Report generation failed: {e}")
-
-        report.generation_time_ms = (time.time() - start_time) * 1000
-        self.store.save_report(report)
-
-        return report
+    def save(self, filepath: str, format: ReportFormat = None) -> None:
+        content = self.render(format)
+        with open(filepath, "w") as f:
+            f.write(content)
 
 
 class ReportManager:
-    """High-level report management."""
-
     def __init__(self):
-        self.store = ReportStore()
-        self.generator = ReportGenerator(self.store)
+        self.templates: Dict[str, ReportConfig] = {}
 
-    def define_report(
-        self,
-        name: str,
-        columns: List[Dict[str, Any]],
-        data_source: Callable[[], List[Dict]],
-        description: str = "",
-        **kwargs
-    ) -> ReportDefinition:
-        """Define a new report."""
-        definition = ReportDefinition(
-            id=hashlib.md5(f"{name}{datetime.now()}".encode()).hexdigest()[:12],
-            name=name,
-            description=description,
-            columns=[
-                ReportColumn(
-                    name=c.get("name", c.get("field")),
-                    field=c.get("field"),
-                    formatter=c.get("formatter"),
-                    width=c.get("width")
-                )
-                for c in columns
-            ],
-            data_source=data_source,
-            **kwargs
-        )
-        
-        self.store.save_definition(definition)
-        return definition
+    def register_template(self, name: str, config: ReportConfig) -> None:
+        self.templates[name] = config
 
-    async def generate(
-        self,
-        definition_id: str,
-        output_format: ReportFormat = ReportFormat.JSON,
-        filters: List[Dict[str, Any]] = None
-    ) -> Optional[GeneratedReport]:
-        """Generate a report."""
-        definition = self.store.get_definition(definition_id)
-        if not definition:
-            return None
-
-        filter_objects = [
-            ReportFilter(field=f["field"], operator=f["operator"], value=f["value"])
-            for f in (filters or [])
-        ]
-
-        return await self.generator.generate(definition, output_format, filter_objects)
-
-    def get_report(self, report_id: str) -> Optional[Dict[str, Any]]:
-        """Get generated report."""
-        report = self.store.get_report(report_id)
-        if report:
-            return {
-                "id": report.id,
-                "status": report.status.value,
-                "format": report.format.value,
-                "row_count": report.row_count,
-                "generated_at": report.generated_at.isoformat() if report.generated_at else None,
-                "generation_time_ms": report.generation_time_ms
-            }
-        return None
-
-    def download_report(self, report_id: str) -> Optional[bytes]:
-        """Download report content."""
-        report = self.store.get_report(report_id)
-        return report.content if report else None
-
-    def schedule_report(
-        self,
-        definition_id: str,
-        frequency: ScheduleFrequency,
-        output_format: ReportFormat = ReportFormat.CSV,
-        recipients: List[str] = None
-    ) -> ReportSchedule:
-        """Schedule a report."""
-        schedule = ReportSchedule(
-            id=str(uuid.uuid4()),
-            definition_id=definition_id,
-            format=output_format,
-            frequency=frequency,
-            recipients=recipients or [],
-            next_run=self._calculate_next_run(frequency)
-        )
-        
-        self.store.save_schedule(schedule)
-        return schedule
-
-    def _calculate_next_run(self, frequency: ScheduleFrequency) -> datetime:
-        now = datetime.now()
-        
-        if frequency == ScheduleFrequency.DAILY:
-            return now + timedelta(days=1)
-        elif frequency == ScheduleFrequency.WEEKLY:
-            return now + timedelta(weeks=1)
-        elif frequency == ScheduleFrequency.MONTHLY:
-            return now + timedelta(days=30)
-        elif frequency == ScheduleFrequency.QUARTERLY:
-            return now + timedelta(days=90)
-        
-        return now + timedelta(days=1)
+    def create(self, title: str = "Report", template: str = None) -> ReportBuilder:
+        if template and template in self.templates:
+            config = self.templates[template]
+            config.title = title
+            return ReportBuilder(config)
+        return ReportBuilder(ReportConfig(title=title))
 
 
-# Example usage
-async def example_usage():
-    """Example report usage."""
+def example_usage():
     manager = ReportManager()
-
-    # Sample data source
-    def get_sales_data():
-        return [
-            {"product": "Widget A", "quantity": 100, "revenue": 5000, "region": "North"},
-            {"product": "Widget B", "quantity": 75, "revenue": 3750, "region": "South"},
-            {"product": "Widget C", "quantity": 200, "revenue": 8000, "region": "North"},
-            {"product": "Widget A", "quantity": 50, "revenue": 2500, "region": "East"},
-        ]
-
-    # Define report
-    definition = manager.define_report(
-        name="Sales Report",
-        description="Monthly sales summary",
-        columns=[
-            {"field": "product", "name": "Product"},
-            {"field": "quantity", "name": "Quantity"},
-            {"field": "revenue", "name": "Revenue", "formatter": lambda x: f"${x:,.2f}"},
-            {"field": "region", "name": "Region"}
-        ],
-        data_source=get_sales_data,
-        sort_by="revenue",
-        sort_order="desc"
+    
+    report = (
+        manager.create("Monthly Sales Report")
+        .subtitle("January 2024")
+        .author("Analytics Team")
+        .section("Executive Summary", "This report summarizes sales performance for January 2024.")
+        .section("Sales by Region")
+        .table([
+            {"Region": "North", "Sales": 150000, "Growth": "12%"},
+            {"Region": "South", "Sales": 120000, "Growth": "8%"},
+            {"Region": "East", "Sales": 180000, "Growth": "15%"},
+            {"Region": "West", "Sales": 90000, "Growth": "5%"},
+        ])
+        .section("Trends")
+        .chart(ChartType.BAR, "Sales by Quarter", ["Q1", "Q2", "Q3", "Q4"], [100, 150, 130, 180])
+        .section("Recommendations", "Based on the data, we recommend focusing on the West region.")
+        .build()
     )
-
-    # Generate reports
-    json_report = await manager.generate(definition.id, ReportFormat.JSON)
-    csv_report = await manager.generate(definition.id, ReportFormat.CSV)
-    html_report = await manager.generate(definition.id, ReportFormat.HTML)
-
-    print(f"JSON Report: {manager.get_report(json_report.id)}")
-    print(f"\nCSV Content:\n{csv_report.content.decode()}")
+    
+    print("HTML Report:")
+    print(report.render(ReportFormat.HTML)[:500])
+    print("\n\nMarkdown Report:")
+    print(report.render(ReportFormat.MARKDOWN))
